@@ -1,0 +1,7 @@
+/bin/*
+/.vs/*
+*.user
+*.vcxproj
+*.sln
+*.pdb
+x64/*
