@@ -11,6 +11,7 @@
 #include <fstream>
 #include <iostream>
 #include <algorithm>
+#include <cuda_profiler_api.h>
 
 #define FULL_MASK 0xFFFFFFFF
 #define WARP_SIZE 32
@@ -40,19 +41,22 @@ __global__ void hybridKernel(uchar* d_inData, uchar* d_outData, uchar M, uint* d
 	uint votes;  // Which threads in the warp passed the predicate for subgroupID == laneID	
 	uint cnt;  // How many threads in the warp passed the predicate for subgroupID == laneID
 	
+	// TODO: Optimize shared memory usage
+	extern  __shared__ uchar smem[];
+
 	// Stage 1
 	#pragma unroll
 	for (uint subgroupID = 0; subgroupID < SUBGROUP_SIZE; subgroupID++)
 	{
-		uint index = groupID * GROUP_SIZE + subgroupID * SUBGROUP_SIZE + laneID;		
+		uchar val = d_inData[groupID * GROUP_SIZE + subgroupID * SUBGROUP_SIZE + laneID];
+		smem[subgroupID * SUBGROUP_SIZE + laneID] = val;
 
-		uint votesLocal = __ballot_sync(FULL_MASK, d_inData[index] > M);
-		uint cntLocal = __popc(votesLocal);
+		uint votesLocal = __ballot_sync(FULL_MASK, val > M);
 
 		if (subgroupID == laneID)
 		{	
 			votes = votesLocal;
-			cnt = cntLocal;			
+			cnt = __popc(votesLocal);			
 		}
 	}
 
@@ -94,7 +98,7 @@ __global__ void hybridKernel(uchar* d_inData, uchar* d_outData, uchar M, uint* d
 		
 		if (votesLocal & (1 << laneID))
 		{
-			d_outData[selectedIndex] = d_inData[groupID * GROUP_SIZE + subgroupID * SUBGROUP_SIZE + laneID];
+			d_outData[selectedIndex] = smem[subgroupID * SUBGROUP_SIZE + laneID];
 		}
 	}
 }
@@ -132,7 +136,7 @@ uint runCUDA(uchar* h_inData, uchar* h_outData, uint numElements, uchar M)
 
 	auto start = std::chrono::high_resolution_clock::now();
 	{
-		hybridKernel<<<grid, threads>>>(d_inData, d_outData, M, d_globalOffset);    
+		hybridKernel<<<grid, threads, WARP_SIZE * SUBGROUP_SIZE * sizeof(uchar)>>>(d_inData, d_outData, M, d_globalOffset);    
 		eee(cudaDeviceSynchronize()); // Make sure we complete the kernel before getting the timer result
 	}
 	auto duration = std::chrono::high_resolution_clock::now() - start;
@@ -148,12 +152,15 @@ uint runCUDA(uchar* h_inData, uchar* h_outData, uint numElements, uchar M)
 	eee(cudaFree(d_inData));
 	eee(cudaFree(d_outData));	
 	eee(cudaFree(d_globalOffset));
+
+	eee(cudaProfilerStop());
+	eee(cudaDeviceReset());
 	return h_globalOffset;
 }
 
 int main(int argc, char **argv)
 {
-	cout << "Starting" << endl;
+	printf("Starting\n");
 	
 	uint numElements = 1024 * 125000;
 	vector<uchar> inputData(numElements);
